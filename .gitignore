@@ -1,0 +1,45 @@
+## Build
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+publish/
+standalone/
+dist/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## IDE
+.vs/
+.idea/
+_ReSharper*/
+*.DotSettings.user
+
+## Logs / NuGet
+[Ll]og/
+[Ll]ogs/
+*.log
+*.binlog
+*.nupkg
+*.snupkg
+project.lock.json
+
+## Packaging
+AppPackages/
+BundleArtifacts/
+*.msix
+*.msixupload
+*.appx
+*.appxbundle
+*.appxupload
+
+## Release artifacts
+*.zip
+
+## Local / OS
+*.tmp
+Thumbs.db
+Desktop.ini
