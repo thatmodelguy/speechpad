@@ -9,6 +9,7 @@ A small always-on-top Windows dictation pad. Speak notes, then copy them whereve
 - Toggle dictation with a one-click mic button
 - Copy to clipboard, optional auto-copy when you stop
 - Clear notes
+- Say **“scratch that”** (or “undo that”) to remove the last dictated phrase
 - Dark, compact UI
 
 ## Run (release)

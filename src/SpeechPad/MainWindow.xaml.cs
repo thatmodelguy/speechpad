@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -9,12 +10,17 @@ namespace SpeechPad;
 
 public partial class MainWindow : Window
 {
+    private static readonly Regex ScratchCommandRegex = new(
+        @"^(?:please\s+)?(?:scratch|undo|delete|ignore|forget)\s+(?:that|it|this)\s*[.!?]*$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     private readonly DictationService _dictation = new();
     private readonly ClipboardService _clipboard = new();
     private readonly AppSettings _settings = AppSettings.Load();
     private readonly DispatcherTimer _copyFeedbackTimer;
 
     private string _committedText = string.Empty;
+    private string? _lastDictatedSegment;
     private bool _isToggling;
     private bool _shutdown;
     private bool _loadingMics;
@@ -156,6 +162,7 @@ public partial class MainWindow : Window
     {
         NotesTextBox.Text = string.Empty;
         _committedText = string.Empty;
+        _lastDictatedSegment = null;
         StatusText.Text = "Notes cleared";
     }
 
@@ -188,7 +195,7 @@ public partial class MainWindow : Window
 
     private void OnFinalResultReceived(object? sender, string text)
     {
-        RunOnUi(() => AppendFinalText(text));
+        RunOnUi(() => HandleDictatedText(text));
     }
 
     private void OnHypothesisReceived(object? sender, string text)
@@ -210,6 +217,25 @@ public partial class MainWindow : Window
         });
     }
 
+    private void HandleDictatedText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        // Keep committed text aligned with any manual edits in the box.
+        _committedText = NotesTextBox.Text ?? string.Empty;
+
+        if (IsScratchCommand(text))
+        {
+            UndoLastDictation();
+            return;
+        }
+
+        AppendFinalText(text.Trim());
+    }
+
     private void AppendFinalText(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -217,21 +243,60 @@ public partial class MainWindow : Window
             return;
         }
 
+        string added;
         if (string.IsNullOrEmpty(_committedText))
         {
+            added = text;
             _committedText = text;
         }
         else if (NeedsSpace(_committedText))
         {
-            _committedText += " " + text;
+            added = " " + text;
+            _committedText += added;
         }
         else
         {
+            added = text;
             _committedText += text;
         }
 
+        _lastDictatedSegment = added;
         NotesTextBox.Text = _committedText;
         NotesTextBox.CaretIndex = NotesTextBox.Text.Length;
+    }
+
+    private void UndoLastDictation()
+    {
+        if (string.IsNullOrEmpty(_lastDictatedSegment))
+        {
+            StatusText.Text = "Nothing to scratch";
+            return;
+        }
+
+        if (_committedText.EndsWith(_lastDictatedSegment, StringComparison.Ordinal))
+        {
+            _committedText = _committedText[..^_lastDictatedSegment.Length];
+        }
+        else
+        {
+            // Manual edits may have changed the ending; still clear the undo marker.
+            StatusText.Text = "Couldn't match the last phrase to undo";
+            _lastDictatedSegment = null;
+            return;
+        }
+
+        _lastDictatedSegment = null;
+        NotesTextBox.Text = _committedText;
+        NotesTextBox.CaretIndex = NotesTextBox.Text.Length;
+        StatusText.Text = "Scratched last dictation";
+    }
+
+    private static bool IsScratchCommand(string text)
+    {
+        var normalized = text.Trim();
+        // Whisper sometimes wraps commands in quotes or adds filler commas.
+        normalized = normalized.Trim('"', '\'', '“', '”');
+        return ScratchCommandRegex.IsMatch(normalized);
     }
 
     private void UpdateListeningUi(bool listening)
