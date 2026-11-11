@@ -7,6 +7,9 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>SpeechPad</AssemblyName>
     <RootNamespace>SpeechPad</RootNamespace>
+    <Version>1.0.2</Version>
+    <AssemblyVersion>1.0.2.0</AssemblyVersion>
+    <FileVersion>1.0.2.0</FileVersion>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
   </PropertyGroup>
 

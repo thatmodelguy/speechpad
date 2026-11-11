@@ -11,7 +11,7 @@ namespace SpeechPad;
 public partial class MainWindow : Window
 {
     private static readonly Regex ScratchCommandRegex = new(
-        @"^(?:please\s+)?(?:scratch|undo|delete|ignore|forget)\s+(?:that|it|this)\s*[.!?]*$",
+        @"^(?:please\s+)?(?:(?:scratch|undo|delete|ignore|forget)\s+(?:that|it|this|the\s+last\s+(?:phrase|sentence|dictation|line))|undo)\s*[.!?]*$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private readonly DictationService _dictation = new();
@@ -20,10 +20,11 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _copyFeedbackTimer;
 
     private string _committedText = string.Empty;
-    private string? _lastDictatedSegment;
+    private readonly List<string> _appendedSegments = new();
     private bool _isToggling;
     private bool _shutdown;
     private bool _loadingMics;
+    private bool _loadingModel;
     private Ellipse? _micBackground;
 
     public MainWindow()
@@ -47,6 +48,7 @@ public partial class MainWindow : Window
         _dictation.MicrophoneDeviceId = string.IsNullOrWhiteSpace(_settings.MicrophoneDeviceId)
             ? null
             : _settings.MicrophoneDeviceId;
+        _dictation.ModelKind = ParseModelKind(_settings.Model);
 
         Loaded += MainWindow_Loaded;
         Closed += MainWindow_Closed;
@@ -58,15 +60,17 @@ public partial class MainWindow : Window
         _micBackground = DictateButton.Template.FindName("Bg", DictateButton) as Ellipse;
         AutoCopyCheckBox.IsChecked = _settings.AutoCopyOnStop;
         LoadMicrophones();
+        LoadModelChoice();
 
         try
         {
-            if (!WhisperModelService.IsModelReady())
+            if (!WhisperModelService.IsModelReady(_dictation.ModelKind))
             {
                 StatusText.Text = "Downloading Whisper model in the background (one-time)…";
             }
 
             await WhisperModelService.EnsureModelAsync(
+                _dictation.ModelKind,
                 new Progress<string>(msg => StatusText.Text = msg));
 
             if (!_dictation.IsListening)
@@ -117,6 +121,51 @@ public partial class MainWindow : Window
         }
     }
 
+    private void LoadModelChoice()
+    {
+        _loadingModel = true;
+        try
+        {
+            ModelCombo.ItemsSource = WhisperModelService.Options;
+            ModelCombo.SelectedItem = WhisperModelService.Options
+                .First(o => o.Kind == _dictation.ModelKind);
+        }
+        finally
+        {
+            _loadingModel = false;
+        }
+    }
+
+    private void ModelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loadingModel || ModelCombo.SelectedItem is not WhisperModelOption option)
+        {
+            return;
+        }
+
+        _dictation.ModelKind = option.Kind;
+        _settings.Model = option.Kind.ToString();
+        _settings.Save();
+
+        if (_dictation.IsListening)
+        {
+            StatusText.Text = "Model changed — stop and start dictation to use it";
+        }
+        else if (WhisperModelService.IsModelReady(option.Kind))
+        {
+            StatusText.Text = $"Using the {option.DisplayName} speech model";
+        }
+        else
+        {
+            StatusText.Text = $"{option.DisplayName} model downloads when you start dictation (one-time)";
+        }
+    }
+
+    private static WhisperModelKind ParseModelKind(string? value) =>
+        Enum.TryParse<WhisperModelKind>(value, ignoreCase: true, out var kind)
+            ? kind
+            : WhisperModelService.DefaultKind;
+
     private async void DictateButton_Click(object sender, RoutedEventArgs e)
     {
         if (_isToggling)
@@ -127,6 +176,7 @@ public partial class MainWindow : Window
         _isToggling = true;
         DictateButton.IsEnabled = false;
         MicrophoneCombo.IsEnabled = false;
+        ModelCombo.IsEnabled = false;
 
         try
         {
@@ -154,6 +204,7 @@ public partial class MainWindow : Window
         {
             DictateButton.IsEnabled = true;
             MicrophoneCombo.IsEnabled = !_dictation.IsListening;
+            ModelCombo.IsEnabled = !_dictation.IsListening;
             _isToggling = false;
         }
     }
@@ -162,7 +213,7 @@ public partial class MainWindow : Window
     {
         NotesTextBox.Text = string.Empty;
         _committedText = string.Empty;
-        _lastDictatedSegment = null;
+        _appendedSegments.Clear();
         StatusText.Text = "Notes cleared";
     }
 
@@ -214,6 +265,7 @@ public partial class MainWindow : Window
         {
             UpdateListeningUi(_dictation.IsListening);
             MicrophoneCombo.IsEnabled = !_dictation.IsListening;
+            ModelCombo.IsEnabled = !_dictation.IsListening;
         });
     }
 
@@ -243,13 +295,29 @@ public partial class MainWindow : Window
             return;
         }
 
+        text = text.Trim();
+
+        // A spoken punctuation mark with no text to attach it to.
+        if (_committedText.Length == 0 && !text.Any(char.IsLetterOrDigit))
+        {
+            return;
+        }
+
+        // Whisper capitalises the first word of every chunk. Keep it lowercase
+        // when the chunk continues a sentence that is already in the box.
+        var existing = _committedText.TrimEnd();
+        if (existing.Length > 0 && existing[^1] is not ('.' or '!' or '?' or ':' or ';' or '\n'))
+        {
+            text = DictationTextFormatter.LowercaseSentenceStart(text);
+        }
+
         string added;
         if (string.IsNullOrEmpty(_committedText))
         {
             added = text;
             _committedText = text;
         }
-        else if (NeedsSpace(_committedText))
+        else if (NeedsSpace(_committedText, text))
         {
             added = " " + text;
             _committedText += added;
@@ -260,32 +328,44 @@ public partial class MainWindow : Window
             _committedText += text;
         }
 
-        _lastDictatedSegment = added;
+        _appendedSegments.Add(added);
         NotesTextBox.Text = _committedText;
         NotesTextBox.CaretIndex = NotesTextBox.Text.Length;
     }
 
     private void UndoLastDictation()
     {
-        if (string.IsNullOrEmpty(_lastDictatedSegment))
+        var removed = false;
+
+        // A spoken punctuation mark ("period") arrives as its own segment but
+        // belongs to the phrase before it, so remove that phrase too.
+        while (_appendedSegments.Count > 0)
+        {
+            var segment = _appendedSegments[^1];
+            if (!_committedText.EndsWith(segment, StringComparison.Ordinal))
+            {
+                // Manual edits may have changed the ending; still clear the undo history.
+                _appendedSegments.Clear();
+                StatusText.Text = "Couldn't match the last phrase to undo";
+                return;
+            }
+
+            _committedText = _committedText[..^segment.Length];
+            _appendedSegments.RemoveAt(_appendedSegments.Count - 1);
+            removed = true;
+
+            if (segment.Any(char.IsLetterOrDigit))
+            {
+                break;
+            }
+        }
+
+        if (!removed)
         {
             StatusText.Text = "Nothing to scratch";
             return;
         }
 
-        if (_committedText.EndsWith(_lastDictatedSegment, StringComparison.Ordinal))
-        {
-            _committedText = _committedText[..^_lastDictatedSegment.Length];
-        }
-        else
-        {
-            // Manual edits may have changed the ending; still clear the undo marker.
-            StatusText.Text = "Couldn't match the last phrase to undo";
-            _lastDictatedSegment = null;
-            return;
-        }
-
-        _lastDictatedSegment = null;
         NotesTextBox.Text = _committedText;
         NotesTextBox.CaretIndex = NotesTextBox.Text.Length;
         StatusText.Text = "Scratched last dictation";
@@ -313,7 +393,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static bool NeedsSpace(string text)
+    private static bool NeedsSpace(string text, string next)
     {
         if (string.IsNullOrEmpty(text))
         {
@@ -321,7 +401,14 @@ public partial class MainWindow : Window
         }
 
         var last = text[^1];
-        return !char.IsWhiteSpace(last) && last is not ('-' or '\'');
+        if (char.IsWhiteSpace(last) || last is '-' or '\'')
+        {
+            return false;
+        }
+
+        // Spoken punctuation attaches to the word before it.
+        return next.Length == 0
+               || next[0] is not ('.' or ',' or ';' or ':' or '!' or '?' or ')' or ']' or '\u201D');
     }
 
     private void RunOnUi(Action action)

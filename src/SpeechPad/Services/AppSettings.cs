@@ -13,6 +13,9 @@ public sealed class AppSettings
     /// <summary>Copy notes to the clipboard automatically when dictation stops.</summary>
     public bool AutoCopyOnStop { get; set; } = true;
 
+    /// <summary>"Fast" (base.en) or "Accurate" (small.en) speech model.</summary>
+    public string Model { get; set; } = nameof(WhisperModelKind.Accurate);
+
     private static string SettingsPath =>
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),

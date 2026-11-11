@@ -18,6 +18,9 @@ public sealed class DictationService : IAsyncDisposable
     private const int SilenceMsToEndPhrase = 600;
     private const int ForceChunkMs = 4000;
     private const int PrefillMs = 250;
+    private const float TargetSpeechRms = 0.08f;
+    private const float PeakCeiling = 0.95f;
+    private const float MaxGain = 12f;
 
     private WasapiCapture? _capture;
     private WaveFormat? _captureFormat;
@@ -45,6 +48,8 @@ public sealed class DictationService : IAsyncDisposable
 
     public string? MicrophoneDeviceId { get; set; }
 
+    public WhisperModelKind ModelKind { get; set; } = WhisperModelService.DefaultKind;
+
     public bool IsListening { get; private set; }
 
     public event EventHandler<string>? FinalResultReceived;
@@ -70,14 +75,16 @@ public sealed class DictationService : IAsyncDisposable
         {
             StatusChanged?.Invoke(this, "Preparing speech model…");
             await WhisperModelService.EnsureModelAsync(
+                ModelKind,
                 new Progress<string>(msg => StatusChanged?.Invoke(this, msg)),
                 _cts.Token);
 
             StatusChanged?.Invoke(this, "Loading speech model…");
-            _factory = WhisperFactory.FromPath(WhisperModelService.ModelPath);
+            _factory = WhisperFactory.FromPath(WhisperModelService.ModelPath(ModelKind));
             _processor = _factory.CreateBuilder()
                 .WithLanguage("en")
-                .WithThreads(Math.Clamp(Environment.ProcessorCount / 2, 2, 6))
+                // Whisper keeps scaling with cores until about 16, so don't stop at a third of them.
+                .WithThreads(Math.Clamp(Environment.ProcessorCount * 3 / 4, 2, 16))
                 .Build();
 
             ResetVadState();
@@ -412,7 +419,7 @@ public sealed class DictationService : IAsyncDisposable
 
     private void AppendSamples(float[] samples, float rms, ref float[]? completedPhrase)
     {
-        var speechThreshold = Math.Max(_noiseFloor * 2.2f, 0.0025f);
+        var speechThreshold = SpeechThreshold;
         var isLoud = rms >= speechThreshold;
         var silenceNeeded = SampleRate * SilenceMsToEndPhrase / 1000;
         var minSpeech = SampleRate * MinSpeechMs / 1000;
@@ -479,13 +486,13 @@ public sealed class DictationService : IAsyncDisposable
             return;
         }
 
-        var pct = Math.Clamp((int)(peak * 500), 0, 100);
-        var hearing = peak >= Math.Max(_noiseFloor * 2.2f, 0.0025f);
+        var pct = LevelPercent(peak);
+        var hearing = peak >= SpeechThreshold;
         StatusChanged?.Invoke(
             this,
             hearing
                 ? $"Listening… hearing voice (level {pct}%)"
-                : $"Listening… mic level {pct}% — if this stays low, choose your USB mic from the list");
+                : $"Listening… mic level {pct}% — raise this mic's input level in Windows if it stays low");
     }
 
     private void ResetVadState()
@@ -542,7 +549,7 @@ public sealed class DictationService : IAsyncDisposable
         }
 
         var parts = new List<string>();
-        await foreach (var segment in _processor.ProcessAsync(samples, cancellationToken))
+        await foreach (var segment in _processor.ProcessAsync(NormalizeLevel(samples), cancellationToken))
         {
             var text = CleanWhisperText(segment.Text);
             if (!string.IsNullOrWhiteSpace(text))
@@ -557,7 +564,16 @@ public sealed class DictationService : IAsyncDisposable
             return;
         }
 
-        FinalResultReceived?.Invoke(this, string.Join(" ", parts));
+        // Drop Whisper's guessed punctuation and non-speech labels, and turn
+        // spoken punctuation words ("period", "comma", …) into symbols.
+        var formatted = DictationTextFormatter.Format(string.Join(" ", parts));
+        if (formatted.Length == 0)
+        {
+            // The chunk was only background noise or a non-speech label.
+            return;
+        }
+
+        FinalResultReceived?.Invoke(this, formatted);
     }
 
     private void OnRecordingStopped(object? sender, StoppedEventArgs e)
@@ -614,6 +630,66 @@ public sealed class DictationService : IAsyncDisposable
         {
             ResetVadState();
         }
+    }
+
+    /// <summary>RMS level that counts as speech, above the calibrated room noise.</summary>
+    private float SpeechThreshold => Math.Max(_noiseFloor * 2.2f, 0.0015f);
+
+    /// <summary>
+    /// Maps RMS to a 0-100 meter on a decibel scale, so quiet speech still reads
+    /// as a usable level instead of a couple of percent.
+    /// </summary>
+    private static int LevelPercent(float rms)
+    {
+        if (rms <= 0f)
+        {
+            return 0;
+        }
+
+        var db = 20 * Math.Log10(rms);
+        return Math.Clamp((int)Math.Round((db + 60d) / 60d * 100d), 0, 100);
+    }
+
+    private static float Peak(float[] samples)
+    {
+        var peak = 0f;
+        foreach (var s in samples)
+        {
+            peak = Math.Max(peak, Math.Abs(s));
+        }
+
+        return peak;
+    }
+
+    /// <summary>
+    /// Quiet microphones leave Whisper with very little signal, which makes it
+    /// slower and less accurate. Lift each phrase to a comfortable level without
+    /// ever attenuating it or clipping the peaks.
+    /// </summary>
+    private static float[] NormalizeLevel(float[] samples)
+    {
+        var rms = RootMeanSquare(samples);
+        if (rms <= 0.00001f)
+        {
+            return samples;
+        }
+
+        var peak = Peak(samples);
+        var rmsGain = TargetSpeechRms / rms;
+        var peakGain = peak > 0.00001f ? PeakCeiling / peak : MaxGain;
+        var gain = Math.Clamp(Math.Min(rmsGain, peakGain), 1f, MaxGain);
+        if (gain <= 1.02f)
+        {
+            return samples;
+        }
+
+        var boosted = new float[samples.Length];
+        for (var i = 0; i < samples.Length; i++)
+        {
+            boosted[i] = Math.Clamp(samples[i] * gain, -1f, 1f);
+        }
+
+        return boosted;
     }
 
     private static float RootMeanSquare(float[] samples)

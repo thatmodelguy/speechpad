@@ -206,8 +206,12 @@
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
-            <!-- Microphone picker -->
+            <!-- Microphone and model pickers -->
             <Grid Grid.Row="0" Margin="0,0,0,12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
@@ -234,6 +238,34 @@
                     <ComboBox x:Name="MicrophoneCombo"
                               Style="{StaticResource DarkComboBox}"
                               SelectionChanged="MicrophoneCombo_SelectionChanged" />
+                </Border>
+
+                <TextBlock Grid.Row="1"
+                           Text="Model"
+                           VerticalAlignment="Center"
+                           Margin="0,8,10,0"
+                           Opacity="0.7"
+                           FontSize="12" />
+
+                <Border Grid.Row="1"
+                        Grid.Column="1"
+                        Margin="0,8,0,0"
+                        CornerRadius="8"
+                        BorderThickness="1"
+                        BorderBrush="#FF2A3038"
+                        Background="#FF0E1116">
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="6"
+                                          ShadowDepth="2"
+                                          Direction="90"
+                                          Color="#FF000000"
+                                          Opacity="0.65" />
+                    </Border.Effect>
+                    <ComboBox x:Name="ModelCombo"
+                              Style="{StaticResource DarkComboBox}"
+                              DisplayMemberPath="DisplayName"
+                              SelectionChanged="ModelCombo_SelectionChanged"
+                              ToolTip="Fast transcribes sooner. Accurate is better with names and unusual words." />
                 </Border>
             </Grid>
 
